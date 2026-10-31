@@ -1,89 +1,79 @@
-"""
-Bài 1: CoAP Server cơ bản
-Định nghĩa tài nguyên /hello và /sensor trên server.
-Hỗ trợ GET và POST.
-"""
+"""Bài 1: Gửi và nhận thông điệp tại /iot/lab/message bằng GET, POST."""
 
+import argparse
 import asyncio
+from datetime import datetime
+
 import aiocoap
 import aiocoap.resource as resource
-import json
-import datetime
+from aiocoap.error import Error
+from aiocoap.numbers.contentformat import ContentFormat
 
 
-# ─────────────────────────────────────────────
-# Tài nguyên /hello  (GET)
-# ─────────────────────────────────────────────
-class HelloResource(resource.Resource):
-    """Tài nguyên đơn giản trả về lời chào."""
+class MessageResource(resource.Resource):
+    """GET trả lời chào; POST nhận thông điệp UTF-8 từ sinh viên."""
 
     async def render_get(self, request):
-        payload = b"Xin chao! Day la CoAP Server IoT."
-        return aiocoap.Message(payload=payload)
-
-
-# ─────────────────────────────────────────────
-# Tài nguyên /sensor  (GET + POST)
-# ─────────────────────────────────────────────
-class SensorResource(resource.Resource):
-    """
-    Mô phỏng cảm biến IoT.
-    - GET  : đọc giá trị hiện tại
-    - POST : cập nhật giá trị (client gửi lên)
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.data = {
-            "temperature": 25.0,
-            "humidity": 60.0,
-            "unit": "Celsius/%RH",
-            "timestamp": datetime.datetime.now().isoformat()
-        }
-
-    async def render_get(self, request):
-        payload = json.dumps(self.data, ensure_ascii=False).encode("utf-8")
-        return aiocoap.Message(payload=payload)
+        print("GET request received: /iot/lab/message")
+        return aiocoap.Message(
+            code=aiocoap.CONTENT,
+            payload=b"Xin chao tu CoAP Server",
+            content_format=ContentFormat.TEXT,
+        )
 
     async def render_post(self, request):
         try:
-            received = json.loads(request.payload.decode("utf-8"))
-            self.data.update(received)
-            self.data["timestamp"] = datetime.datetime.now().isoformat()
-            # (Observe được hỗ trợ đầy đủ ở Bài 3)
-            response_payload = json.dumps(
-                {"status": "ok", "updated": received}, ensure_ascii=False
-            ).encode("utf-8")
-            return aiocoap.Message(
-                code=aiocoap.CHANGED, payload=response_payload
-            )
-        except Exception as e:
+            message = request.payload.decode("utf-8")
+        except UnicodeDecodeError:
             return aiocoap.Message(
                 code=aiocoap.BAD_REQUEST,
-                payload=f"Loi: {e}".encode("utf-8")
+                payload=b"Loi: Thong diep phai su dung UTF-8",
+                content_format=ContentFormat.TEXT,
             )
 
+        if not message.strip():
+            return aiocoap.Message(
+                code=aiocoap.BAD_REQUEST,
+                payload=b"Loi: Thong diep khong duoc de trong",
+                content_format=ContentFormat.TEXT,
+            )
 
-# ─────────────────────────────────────────────
-# Khởi động server
-# ─────────────────────────────────────────────
-async def main():
+        received_at = datetime.now().strftime("%H:%M:%S")
+        print("POST request received:")
+        print(f"Payload: {message}")
+        print(f"Time: {received_at}")
+        return aiocoap.Message(
+            code=aiocoap.CHANGED,
+            payload=b"Server da nhan thong diep",
+            content_format=ContentFormat.TEXT,
+        )
+
+
+async def main(host="127.0.0.1", port=5683):
     root = resource.Site()
-    root.add_resource(["hello"], HelloResource())
-    root.add_resource(["sensor"], SensorResource())
-
-    # WKC (Well-Known Core) để client discovery tài nguyên
+    root.add_resource(["iot", "lab", "message"], MessageResource())
     root.add_resource(
         [".well-known", "core"],
-        resource.WKCResource(root.get_resources_as_linkheader)
+        resource.WKCResource(root.get_resources_as_linkheader),
     )
 
-    await aiocoap.Context.create_server_context(root, bind=("127.0.0.1", 5683))
-    print("=== CoAP Server dang chay tai coap://127.0.0.1:5683 ===")
-    print("  Tai nguyen: /hello  (GET)")
-    print("  Tai nguyen: /sensor (GET, POST, Observe)")
-    await asyncio.get_event_loop().create_future()   # chạy mãi
+    context = await aiocoap.Context.create_server_context(root, bind=(host, port))
+    try:
+        print(f"CoAP Server started on port {port}")
+        print(f"Resource: coap://{host}:{port}/iot/lab/message (GET, POST)")
+        await asyncio.get_running_loop().create_future()
+    finally:
+        await context.shutdown()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="127.0.0.1", help="Dia chi IP cua may Server")
+    parser.add_argument("--port", type=int, default=5683, help="Cong CoAP (mac dinh: 5683)")
+    args = parser.parse_args()
+    try:
+        asyncio.run(main(args.host, args.port))
+    except KeyboardInterrupt:
+        print("\nDa dung CoAP Server.")
+    except (Error, OSError) as exc:
+        raise SystemExit(f"Loi khoi dong CoAP Server: {exc}")

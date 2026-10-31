@@ -1,129 +1,94 @@
-"""
-Bài 3: CoAP Observe – giám sát thay đổi tài nguyên theo thời gian thực
-Server tự động cập nhật dữ liệu cảm biến và thông báo cho Observer.
-"""
+"""Bài 3: Điều khiển và Observe trạng thái đèn tại /iot/lab/light01/status."""
 
+import argparse
 import asyncio
+import json
+
 import aiocoap
 import aiocoap.resource as resource
-import json
-import datetime
-import random
+from aiocoap.error import Error
+from aiocoap.numbers.contentformat import ContentFormat
 
 
-# ─────────────────────────────────────────────────────────────────
-# Tài nguyên Observable: /monitor/sensors
-# ─────────────────────────────────────────────────────────────────
-class MultiSensorResource(resource.ObservableResource):
-    """
-    Tổng hợp nhiều cảm biến, tự cập nhật mỗi 3 giây.
-    Hỗ trợ Observe để client nhận thông báo tự động.
-    """
+class LightResource(resource.ObservableResource):
+    """Đèn light01 ban đầu OFF; chỉ thông báo khi trạng thái thay đổi."""
 
     def __init__(self):
         super().__init__()
-        self.sensors = {
-            "temperature": 25.0,
-            "humidity": 60.0,
-            "light": 800,        # lux
-            "motion": False,
-            "timestamp": datetime.datetime.now().isoformat()
-        }
-        asyncio.get_event_loop().call_soon(
-            lambda: asyncio.ensure_future(self._update_loop())
+        self.status = "OFF"
+
+    def state_response(self, code=aiocoap.CONTENT):
+        data = {"device_id": "light01", "status": self.status}
+        return aiocoap.Message(
+            code=code,
+            payload=json.dumps(data).encode("utf-8"),
+            content_format=ContentFormat.JSON,
         )
 
-    async def _update_loop(self):
-        """Mô phỏng cảm biến thay đổi liên tục."""
-        while True:
-            await asyncio.sleep(3)
-            self.sensors["temperature"] = round(20 + random.uniform(0, 15), 1)
-            self.sensors["humidity"]    = round(40 + random.uniform(0, 40), 1)
-            self.sensors["light"]       = random.randint(0, 1000)
-            self.sensors["motion"]      = random.choice([True, False])
-            self.sensors["timestamp"]   = datetime.datetime.now().isoformat()
+    def update_observation_count(self, newcount):
+        print(f"Observers: {newcount}")
+
+    async def render_get(self, request):
+        return self.state_response()
+
+    async def render_put(self, request):
+        try:
+            data = json.loads(request.payload.decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("Payload phai la mot doi tuong JSON.")
+            if data.get("device_id") != "light01":
+                raise ValueError("device_id phai la light01.")
+            command = data.get("command")
+            if command not in ("ON", "OFF"):
+                raise ValueError("Lenh dieu khien phai la ON hoac OFF.")
+        except ValueError as exc:
+            return aiocoap.Message(
+                code=aiocoap.BAD_REQUEST,
+                payload=f"Loi: {exc}".encode("utf-8"),
+                content_format=ContentFormat.TEXT,
+            )
+
+        print("PUT request received:")
+        print("Device: light01")
+        print(f"Command: {command}")
+        previous = self.status
+        self.status = command
+        if previous != self.status:
+            print(f"Light state changed: {previous} -> {self.status}")
             self.updated_state()
-            print(f"  [Update] {self.sensors}")
-
-    async def render_get(self, request):
-        payload = json.dumps(self.sensors, ensure_ascii=False).encode("utf-8")
-        return aiocoap.Message(payload=payload)
-
-
-# ─────────────────────────────────────────────────────────────────
-# Tài nguyên Observable: /monitor/alert
-# ─────────────────────────────────────────────────────────────────
-class AlertResource(resource.ObservableResource):
-    """
-    Phát cảnh báo khi nhiệt độ vượt ngưỡng.
-    Kết hợp với MultiSensorResource.
-    """
-
-    def __init__(self, sensor_resource: MultiSensorResource):
-        super().__init__()
-        self.sensor = sensor_resource
-        self.alert = {"level": "normal", "message": "Tat ca binh thuong", "timestamp": ""}
-        asyncio.get_event_loop().call_soon(
-            lambda: asyncio.ensure_future(self._watch_loop())
-        )
-
-    async def _watch_loop(self):
-        prev_level = "normal"
-        while True:
-            await asyncio.sleep(3.5)
-            temp = self.sensor.sensors.get("temperature", 0)
-            motion = self.sensor.sensors.get("motion", False)
-
-            if temp > 32:
-                level = "danger"
-                msg = f"NGUY HIEM! Nhiet do cao: {temp}°C"
-            elif temp > 28:
-                level = "warning"
-                msg = f"CANH BAO: Nhiet do cao: {temp}°C"
-            elif motion:
-                level = "info"
-                msg = "Phat hien chuyen dong!"
-            else:
-                level = "normal"
-                msg = "Tat ca binh thuong"
-
-            self.alert = {
-                "level": level,
-                "message": msg,
-                "temperature": temp,
-                "timestamp": datetime.datetime.now().isoformat()
-            }
-            if level != prev_level:
-                self.updated_state()
-                prev_level = level
-
-    async def render_get(self, request):
-        payload = json.dumps(self.alert, ensure_ascii=False).encode("utf-8")
-        return aiocoap.Message(payload=payload)
+            print(f"Notify observers: {self.status}")
+        else:
+            print(f"Light state unchanged: {self.status}")
+        return self.state_response(aiocoap.CHANGED)
 
 
-# ─────────────────────────────────────────────────────────────────
-# Khởi động server
-# ─────────────────────────────────────────────────────────────────
-async def main():
+async def main(host="127.0.0.1", port=5683):
     root = resource.Site()
-
-    sensor_res = MultiSensorResource()
-    root.add_resource(["monitor", "sensors"], sensor_res)
-    root.add_resource(["monitor", "alert"],   AlertResource(sensor_res))
-
+    root.add_resource(["iot", "lab", "light01", "status"], LightResource())
     root.add_resource(
         [".well-known", "core"],
-        resource.WKCResource(root.get_resources_as_linkheader)
+        resource.WKCResource(root.get_resources_as_linkheader),
     )
-
-    await aiocoap.Context.create_server_context(root, bind=("127.0.0.1", 5683))
-    print("=== CoAP Server Bai 3 (Observe) dang chay ===")
-    print("  /monitor/sensors  (GET, Observe)")
-    print("  /monitor/alert    (GET, Observe)")
-    print("  Du lieu tu dong cap nhat moi 3 giay...")
-    await asyncio.get_event_loop().create_future()
+    context = await aiocoap.Context.create_server_context(root, bind=(host, port))
+    try:
+        print(f"CoAP Smart Light Server started on port {port}")
+        print(f"Resource: coap://{host}:{port}/iot/lab/light01/status")
+        print("Initial State: OFF")
+        await asyncio.get_running_loop().create_future()
+    finally:
+        await context.shutdown()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="127.0.0.1", help="Dia chi IP cua may Server")
+    parser.add_argument("--port", type=int, default=5683, help="Cong CoAP")
+    args = parser.parse_args()
+    if not 1 <= args.port <= 65535:
+        parser.error("Cong CoAP phai nam trong khoang 1-65535.")
+    try:
+        asyncio.run(main(args.host, args.port))
+    except KeyboardInterrupt:
+        print("\nDa dung Smart Light Server.")
+    except (Error, OSError) as exc:
+        raise SystemExit(f"Loi khoi dong CoAP Server: {exc}")

@@ -1,139 +1,85 @@
-"""
-Bài 2: CoAP Server với PUT (cập nhật trạng thái thiết bị)
-Mô hình thiết bị IoT: đèn, quạt, nhiệt độ.
-Hỗ trợ GET, POST, PUT.
-"""
+"""Bài 2: Cung cấp dữ liệu nhiệt độ, độ ẩm tại /iot/lab/sensor01/data."""
 
+import argparse
 import asyncio
+from contextlib import suppress
+from datetime import datetime
+import json
+import random
+
 import aiocoap
 import aiocoap.resource as resource
-import json
-import datetime
+from aiocoap.error import Error
+from aiocoap.numbers.contentformat import ContentFormat
 
 
-# ─────────────────────────────────────────────────────────────────
-# Tài nguyên /device/{name}  (GET + PUT)
-# ─────────────────────────────────────────────────────────────────
-class DeviceResource(resource.ObservableResource):
-    """
-    Đại diện cho một thiết bị IoT (đèn, quạt, …).
-    URI pattern: /device/<ten_thiet_bi>
-    """
-
-    def __init__(self, name: str, initial_state: dict):
-        super().__init__()
-        self.name = name
-        self.state = initial_state
-        self.state["last_updated"] = datetime.datetime.now().isoformat()
-
-    # GET – đọc trạng thái hiện tại
-    async def render_get(self, request):
-        payload = json.dumps(self.state, ensure_ascii=False).encode("utf-8")
-        return aiocoap.Message(payload=payload)
-
-    # PUT – cập nhật (thay thế) trạng thái
-    async def render_put(self, request):
-        try:
-            new_state = json.loads(request.payload.decode("utf-8"))
-            self.state.update(new_state)
-            self.state["last_updated"] = datetime.datetime.now().isoformat()
-            self.updated_state()
-            resp = json.dumps(
-                {"status": "updated", "device": self.name, "state": self.state},
-                ensure_ascii=False
-            ).encode("utf-8")
-            return aiocoap.Message(code=aiocoap.CHANGED, payload=resp)
-        except Exception as e:
-            return aiocoap.Message(
-                code=aiocoap.BAD_REQUEST,
-                payload=f"Loi: {e}".encode("utf-8")
-            )
-
-    # POST – nhận lệnh điều khiển
-    async def render_post(self, request):
-        try:
-            cmd = json.loads(request.payload.decode("utf-8"))
-            action = cmd.get("action", "")
-            if action == "toggle":
-                current = self.state.get("status", "off")
-                self.state["status"] = "off" if current == "on" else "on"
-            elif action in ("on", "off"):
-                self.state["status"] = action
-            else:
-                self.state.update(cmd)
-            self.state["last_updated"] = datetime.datetime.now().isoformat()
-            self.updated_state()
-            resp = json.dumps(
-                {"status": "ok", "device": self.name, "state": self.state},
-                ensure_ascii=False
-            ).encode("utf-8")
-            return aiocoap.Message(code=aiocoap.CHANGED, payload=resp)
-        except Exception as e:
-            return aiocoap.Message(
-                code=aiocoap.BAD_REQUEST,
-                payload=f"Loi: {e}".encode("utf-8")
-            )
+UPDATE_INTERVAL = 3.0
 
 
-# ─────────────────────────────────────────────────────────────────
-# Tài nguyên /sensor/temperature  (GET, Observe)
-# ─────────────────────────────────────────────────────────────────
-class TemperatureResource(resource.ObservableResource):
-    """Cảm biến nhiệt độ tự động tăng mỗi 5 giây."""
+class SensorResource(resource.Resource):
+    """Lưu mẫu cảm biến mới nhất; GET không làm thay đổi dữ liệu."""
 
     def __init__(self):
         super().__init__()
-        self.temp = 22.0
-        asyncio.get_event_loop().call_soon(
-            lambda: asyncio.ensure_future(self._auto_update())
-        )
+        self.update_data()
 
-    async def _auto_update(self):
-        import random
+    def update_data(self):
+        self.data = {
+            "device_id": "sensor01",
+            "temperature": round(random.uniform(20.0, 40.0), 1),
+            "humidity": round(random.uniform(30.0, 80.0), 1),
+        }
+
+    async def update_loop(self):
         while True:
-            await asyncio.sleep(5)
-            self.temp = round(20 + random.uniform(0, 10), 1)
-            self.updated_state()
-            print(f"  [Sensor] Nhiet do cap nhat: {self.temp}°C")
+            await asyncio.sleep(UPDATE_INTERVAL)
+            self.update_data()
+            print(f"[{datetime.now():%H:%M:%S}] Sensor updated: {self.data}")
 
     async def render_get(self, request):
-        data = {
-            "sensor": "temperature",
-            "value": self.temp,
-            "unit": "Celsius",
-            "timestamp": datetime.datetime.now().isoformat()
-        }
-        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        return aiocoap.Message(payload=payload)
+        print("GET request received: /iot/lab/sensor01/data")
+        return aiocoap.Message(
+            code=aiocoap.CONTENT,
+            payload=json.dumps(self.data).encode("utf-8"),
+            content_format=ContentFormat.JSON,
+        )
 
 
-# ─────────────────────────────────────────────────────────────────
-# Khởi động server
-# ─────────────────────────────────────────────────────────────────
-async def main():
+async def main(host="127.0.0.1", port=5683):
+    sensor = SensorResource()
     root = resource.Site()
-
-    # Thiết bị
-    root.add_resource(["device", "den"],  DeviceResource("den",  {"status": "off", "brightness": 100}))
-    root.add_resource(["device", "quat"], DeviceResource("quat", {"status": "off", "speed": 1}))
-    root.add_resource(["device", "dieu-hoa"], DeviceResource("dieu-hoa", {"status": "off", "temp_set": 26}))
-
-    # Cảm biến
-    root.add_resource(["sensor", "temperature"], TemperatureResource())
-
+    root.add_resource(["iot", "lab", "sensor01", "data"], sensor)
     root.add_resource(
         [".well-known", "core"],
-        resource.WKCResource(root.get_resources_as_linkheader)
+        resource.WKCResource(root.get_resources_as_linkheader),
     )
 
-    await aiocoap.Context.create_server_context(root, bind=("127.0.0.1", 5683))
-    print("=== CoAP Server Bai 2 dang chay tai coap://127.0.0.1:5683 ===")
-    print("  /device/den        (GET, POST, PUT)")
-    print("  /device/quat       (GET, POST, PUT)")
-    print("  /device/dieu-hoa   (GET, POST, PUT)")
-    print("  /sensor/temperature (GET, Observe)")
-    await asyncio.get_event_loop().create_future()
+    context = await aiocoap.Context.create_server_context(root, bind=(host, port))
+    update_task = asyncio.create_task(sensor.update_loop())
+    try:
+        print(f"Sensor CoAP Server started on port {port}")
+        print(f"Resource: coap://{host}:{port}/iot/lab/sensor01/data (GET)")
+        print(f"Du lieu cam bien duoc cap nhat moi {UPDATE_INTERVAL:g} giay.")
+        await asyncio.get_running_loop().create_future()
+    finally:
+        update_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await update_task
+        await context.shutdown()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default="127.0.0.1", help="Dia chi IP cua may Server")
+    parser.add_argument(
+        "--port", type=int, default=5683, help="Cong CoAP (mac dinh: 5683)"
+    )
+    args = parser.parse_args()
+    if not 1 <= args.port <= 65535:
+        parser.error("Cong CoAP phai nam trong khoang 1-65535.")
+    try:
+        asyncio.run(main(args.host, args.port))
+    except KeyboardInterrupt:
+        print("\nDa dung Sensor CoAP Server.")
+    except (Error, OSError) as exc:
+        raise SystemExit(f"Loi khoi dong CoAP Server: {exc}")
